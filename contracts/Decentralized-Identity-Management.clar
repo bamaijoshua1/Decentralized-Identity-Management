@@ -238,3 +238,167 @@
     (ok true)
   )
 )
+
+(define-map delegations
+  { did: (string-ascii 64), delegate: principal }
+  {
+    permissions: (list 10 (string-ascii 32)),
+    expires-at: uint,
+    granted-at: uint,
+    active: bool
+  }
+)
+
+(define-map delegation-nonces
+  { did: (string-ascii 64) }
+  { nonce: uint }
+)
+
+(define-constant PERMISSION-READ-ATTRIBUTES "read-attributes")
+(define-constant PERMISSION-UPDATE-PROFILE "update-profile")
+(define-constant PERMISSION-ADD-ATTRIBUTES "add-attributes")
+(define-constant PERMISSION-MANAGE-RECOVERY "manage-recovery")
+
+(define-constant ERR-DELEGATION-EXPIRED (err u200))
+(define-constant ERR-INSUFFICIENT-PERMISSIONS (err u201))
+(define-constant ERR-DELEGATION-NOT-FOUND (err u202))
+
+(define-public (grant-delegation 
+  (delegate principal) 
+  (permissions (list 10 (string-ascii 32))) 
+  (duration-blocks uint))
+  (let (
+    (identity (get-identity-by-owner tx-sender))
+    (expires-at (+ stacks-block-height duration-blocks))
+  )
+    (match identity
+      existing (begin
+        (map-set delegations
+          { did: (get did existing), delegate: delegate }
+          {
+            permissions: permissions,
+            expires-at: expires-at,
+            granted-at: stacks-block-height,
+            active: true
+          }
+        )
+        (map-set delegation-nonces
+          { did: (get did existing) }
+          { nonce: (+ (get-delegation-nonce (get did existing)) u1) }
+        )
+        (ok true)
+      )
+      (err ERR-NOT-FOUND)
+    )
+  )
+)
+
+(define-public (revoke-delegation (delegate principal))
+  (let ((identity (get-identity-by-owner tx-sender)))
+    (match identity
+      existing (begin
+        (map-delete delegations { did: (get did existing), delegate: delegate })
+        (ok true)
+      )
+      (err ERR-NOT-FOUND)
+    )
+  )
+)
+
+(define-public (update-identity-delegated (target-did (string-ascii 64)) (name (string-ascii 64)))
+  (let ((delegation-info (get-delegation target-did tx-sender)))
+    (asserts! (is-valid-delegation delegation-info PERMISSION-UPDATE-PROFILE) ERR-INSUFFICIENT-PERMISSIONS)
+    (match (get-identity-by-did target-did)
+      identity (begin
+        (map-set identities 
+          { owner: (get-identity-owner target-did) }
+          (merge identity { 
+            name: name,
+            updated-at: stacks-block-height
+          })
+        )
+        (ok true)
+      )
+      ERR-NOT-FOUND
+    )
+  )
+)
+
+(define-public (add-attribute-delegated 
+  (target-did (string-ascii 64)) 
+  (key (string-ascii 64)) 
+  (value (string-ascii 256)))
+  (let ((delegation-info (get-delegation target-did tx-sender)))
+    (asserts! (is-valid-delegation delegation-info PERMISSION-ADD-ATTRIBUTES) ERR-INSUFFICIENT-PERMISSIONS)
+    (map-set identity-attributes
+      { did: target-did, key: key }
+      { value: value }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-delegation (did (string-ascii 64)) (delegate principal))
+  (map-get? delegations { did: did, delegate: delegate })
+)
+
+(define-read-only (get-delegation-nonce (did (string-ascii 64)))
+  (default-to u0 
+    (get nonce (map-get? delegation-nonces { did: did }))
+  )
+)
+
+(define-read-only (is-valid-delegation 
+  (delegation-opt (optional {permissions: (list 10 (string-ascii 32)), expires-at: uint, granted-at: uint, active: bool}))
+  (required-permission (string-ascii 32)))
+  (match delegation-opt
+    delegation (and 
+      (get active delegation)
+      (< stacks-block-height (get expires-at delegation))
+      (is-some (index-of (get permissions delegation) required-permission))
+    )
+    false
+  )
+)
+
+(define-read-only (get-identity-owner (did (string-ascii 64)))
+  (match (fold check-identity-owner (list tx-sender) none)
+    owner owner
+    tx-sender
+  )
+)
+
+(define-private (check-identity-owner (owner principal) (acc (optional principal)))
+  (match acc
+    found acc
+    (match (map-get? identities { owner: owner })
+      identity (some owner)
+      none
+    )
+  )
+)
+
+(define-read-only (get-active-delegations (did (string-ascii 64)))
+  (let ((current-nonce (get-delegation-nonce did)))
+    (map get-delegation-if-active 
+      (list 
+        { did: did, delegate: tx-sender }
+      )
+    )
+  )
+)
+
+(define-private (get-delegation-if-active (key { did: (string-ascii 64), delegate: principal }))
+  (let ((delegation (map-get? delegations key)))
+    (match delegation
+      del (if (and 
+        (get active del)
+        (< stacks-block-height (get expires-at del))
+      )
+        (some del)
+        none
+      )
+      none
+    )
+  )
+)
