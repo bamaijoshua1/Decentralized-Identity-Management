@@ -709,4 +709,364 @@
   )
 )
 
+;; Identity Credential Marketplace - Monetized credential ecosystem
+(define-map credential-templates
+  { template-id: uint }
+  {
+    issuer: principal,
+    template-name: (string-ascii 64),
+    description: (string-ascii 256),
+    price: uint,
+    validity-period: uint,
+    active: bool,
+    created-at: uint
+  }
+)
+
+(define-map issued-credentials
+  { credential-id: uint }
+  {
+    template-id: uint,
+    issuer: principal,
+    holder: principal,
+    credential-data: (string-ascii 512),
+    issued-at: uint,
+    expires-at: uint,
+    for-sale: bool,
+    sale-price: uint,
+    validated: bool
+  }
+)
+
+(define-map marketplace-listings
+  { listing-id: uint }
+  {
+    credential-id: uint,
+    seller: principal,
+    price: uint,
+    listed-at: uint,
+    active: bool
+  }
+)
+
+(define-map credential-purchases
+  { purchase-id: uint }
+  {
+    credential-id: uint,
+    buyer: principal,
+    seller: principal,
+    amount-paid: uint,
+    purchased-at: uint,
+    issuer-share: uint
+  }
+)
+
+(define-map credential-disputes
+  { dispute-id: uint }
+  {
+    credential-id: uint,
+    disputer: principal,
+    reason: (string-ascii 256),
+    status: (string-ascii 32),
+    created-at: uint,
+    resolved-at: uint
+  }
+)
+
+(define-data-var template-nonce uint u0)
+(define-data-var credential-nonce uint u0)
+(define-data-var listing-nonce uint u0)
+(define-data-var purchase-nonce uint u0)
+(define-data-var dispute-nonce uint u0)
+(define-data-var marketplace-fee-percentage uint u5)
+
+(define-constant DISPUTE-STATUS-OPEN "open")
+(define-constant DISPUTE-STATUS-RESOLVED "resolved")
+(define-constant DISPUTE-STATUS-REJECTED "rejected")
+
+(define-constant ERR-TEMPLATE-NOT-FOUND (err u500))
+(define-constant ERR-CREDENTIAL-NOT-FOUND (err u501))
+(define-constant ERR-LISTING-NOT-FOUND (err u502))
+(define-constant ERR-INSUFFICIENT-PAYMENT (err u503))
+(define-constant ERR-CREDENTIAL-EXPIRED (err u504))
+(define-constant ERR-NOT-FOR-SALE (err u505))
+(define-constant ERR-ALREADY-OWNER (err u506))
+(define-constant ERR-DISPUTE-EXISTS (err u507))
+
+;; Create a credential template that others can purchase
+(define-public (create-credential-template 
+  (template-name (string-ascii 64))
+  (description (string-ascii 256))
+  (price uint)
+  (validity-period uint))
+  (let (
+    (template-id (+ (var-get template-nonce) u1))
+    (identity (get-identity-by-owner tx-sender))
+  )
+    (match identity
+      existing (begin
+        (asserts! (get verified existing) ERR-NOT-AUTHORIZED)
+        (var-set template-nonce template-id)
+        (map-set credential-templates
+          { template-id: template-id }
+          {
+            issuer: tx-sender,
+            template-name: template-name,
+            description: description,
+            price: price,
+            validity-period: validity-period,
+            active: true,
+            created-at: stacks-block-height
+          }
+        )
+        (ok template-id)
+      )
+      ERR-NOT-FOUND
+    )
+  )
+)
+
+;; Issue a credential to another identity
+(define-public (issue-credential 
+  (template-id uint)
+  (holder principal)
+  (credential-data (string-ascii 512)))
+  (let (
+    (template (map-get? credential-templates { template-id: template-id }))
+    (credential-id (+ (var-get credential-nonce) u1))
+  )
+    (match template
+      template-data (begin
+        (asserts! (is-eq tx-sender (get issuer template-data)) ERR-NOT-AUTHORIZED)
+        (asserts! (get active template-data) ERR-TEMPLATE-NOT-FOUND)
+        (var-set credential-nonce credential-id)
+        (map-set issued-credentials
+          { credential-id: credential-id }
+          {
+            template-id: template-id,
+            issuer: tx-sender,
+            holder: holder,
+            credential-data: credential-data,
+            issued-at: stacks-block-height,
+            expires-at: (+ stacks-block-height (get validity-period template-data)),
+            for-sale: false,
+            sale-price: u0,
+            validated: true
+          }
+        )
+        (ok credential-id)
+      )
+      ERR-TEMPLATE-NOT-FOUND
+    )
+  )
+)
+
+;; List a credential for sale in the marketplace
+(define-public (list-credential-for-sale (credential-id uint) (sale-price uint))
+  (let (
+    (credential (map-get? issued-credentials { credential-id: credential-id }))
+    (listing-id (+ (var-get listing-nonce) u1))
+  )
+    (match credential
+      credential-data (begin
+        (asserts! (is-eq tx-sender (get holder credential-data)) ERR-NOT-AUTHORIZED)
+        (asserts! (< stacks-block-height (get expires-at credential-data)) ERR-CREDENTIAL-EXPIRED)
+        (var-set listing-nonce listing-id)
+        (map-set issued-credentials
+          { credential-id: credential-id }
+          (merge credential-data {
+            for-sale: true,
+            sale-price: sale-price
+          })
+        )
+        (map-set marketplace-listings
+          { listing-id: listing-id }
+          {
+            credential-id: credential-id,
+            seller: tx-sender,
+            price: sale-price,
+            listed-at: stacks-block-height,
+            active: true
+          }
+        )
+        (ok listing-id)
+      )
+      ERR-CREDENTIAL-NOT-FOUND
+    )
+  )
+)
+
+;; Purchase a credential from the marketplace
+(define-public (purchase-credential (listing-id uint))
+  (let (
+    (listing (map-get? marketplace-listings { listing-id: listing-id }))
+    (purchase-id (+ (var-get purchase-nonce) u1))
+  )
+    (match listing
+      listing-data (begin
+        (asserts! (get active listing-data) ERR-LISTING-NOT-FOUND)
+        (let (
+          (credential (unwrap! (map-get? issued-credentials { credential-id: (get credential-id listing-data) }) ERR-CREDENTIAL-NOT-FOUND))
+          (template (unwrap! (map-get? credential-templates { template-id: (get template-id credential) }) ERR-TEMPLATE-NOT-FOUND))
+          (sale-price (get price listing-data))
+          (marketplace-fee (/ (* sale-price (var-get marketplace-fee-percentage)) u100))
+          (issuer-share (/ (* sale-price u15) u100))
+          (seller-amount (- sale-price (+ marketplace-fee issuer-share)))
+        )
+          (asserts! (not (is-eq tx-sender (get seller listing-data))) ERR-ALREADY-OWNER)
+          (asserts! (< stacks-block-height (get expires-at credential)) ERR-CREDENTIAL-EXPIRED)
+          (try! (stx-transfer? sale-price tx-sender (get seller listing-data)))
+          (try! (stx-transfer? issuer-share (get seller listing-data) (get issuer template)))
+          (var-set purchase-nonce purchase-id)
+          (map-set issued-credentials
+            { credential-id: (get credential-id listing-data) }
+            (merge credential {
+              holder: tx-sender,
+              for-sale: false,
+              sale-price: u0
+            })
+          )
+          (map-set marketplace-listings
+            { listing-id: listing-id }
+            (merge listing-data { active: false })
+          )
+          (map-set credential-purchases
+            { purchase-id: purchase-id }
+            {
+              credential-id: (get credential-id listing-data),
+              buyer: tx-sender,
+              seller: (get seller listing-data),
+              amount-paid: sale-price,
+              purchased-at: stacks-block-height,
+              issuer-share: issuer-share
+            }
+          )
+          (ok purchase-id)
+        )
+      )
+      ERR-LISTING-NOT-FOUND
+    )
+  )
+)
+
+;; Validate a credential's authenticity
+(define-public (validate-credential (credential-id uint))
+  (let ((credential (map-get? issued-credentials { credential-id: credential-id })))
+    (match credential
+      credential-data (begin
+        (asserts! (< stacks-block-height (get expires-at credential-data)) ERR-CREDENTIAL-EXPIRED)
+        (ok {
+          valid: true,
+          issuer: (get issuer credential-data),
+          holder: (get holder credential-data),
+          issued-at: (get issued-at credential-data),
+          expires-at: (get expires-at credential-data)
+        })
+      )
+      ERR-CREDENTIAL-NOT-FOUND
+    )
+  )
+)
+
+;; File a dispute against a credential
+(define-public (dispute-credential (credential-id uint) (reason (string-ascii 256)))
+  (let (
+    (credential (map-get? issued-credentials { credential-id: credential-id }))
+    (dispute-id (+ (var-get dispute-nonce) u1))
+  )
+    (match credential
+      credential-data (begin
+        (var-set dispute-nonce dispute-id)
+        (map-set credential-disputes
+          { dispute-id: dispute-id }
+          {
+            credential-id: credential-id,
+            disputer: tx-sender,
+            reason: reason,
+            status: DISPUTE-STATUS-OPEN,
+            created-at: stacks-block-height,
+            resolved-at: u0
+          }
+        )
+        (ok dispute-id)
+      )
+      ERR-CREDENTIAL-NOT-FOUND
+    )
+  )
+)
+
+;; Resolve a credential dispute (admin only)
+(define-public (resolve-dispute (dispute-id uint) (resolution (string-ascii 32)))
+  (let ((dispute (map-get? credential-disputes { dispute-id: dispute-id })))
+    (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+    (match dispute
+      dispute-data (begin
+        (map-set credential-disputes
+          { dispute-id: dispute-id }
+          (merge dispute-data {
+            status: resolution,
+            resolved-at: stacks-block-height
+          })
+        )
+        (ok true)
+      )
+      ERR-NOT-FOUND
+    )
+  )
+)
+
+;; Deactivate a credential template
+(define-public (deactivate-template (template-id uint))
+  (let ((template (map-get? credential-templates { template-id: template-id })))
+    (match template
+      template-data (begin
+        (asserts! (is-eq tx-sender (get issuer template-data)) ERR-NOT-AUTHORIZED)
+        (map-set credential-templates
+          { template-id: template-id }
+          (merge template-data { active: false })
+        )
+        (ok true)
+      )
+      ERR-TEMPLATE-NOT-FOUND
+    )
+  )
+)
+
+;; Read-only functions for marketplace queries
+(define-read-only (get-credential-template (template-id uint))
+  (map-get? credential-templates { template-id: template-id })
+)
+
+(define-read-only (get-credential (credential-id uint))
+  (map-get? issued-credentials { credential-id: credential-id })
+)
+
+(define-read-only (get-marketplace-listing (listing-id uint))
+  (map-get? marketplace-listings { listing-id: listing-id })
+)
+
+(define-read-only (get-purchase-record (purchase-id uint))
+  (map-get? credential-purchases { purchase-id: purchase-id })
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+  (map-get? credential-disputes { dispute-id: dispute-id })
+)
+
+(define-read-only (is-credential-valid (credential-id uint))
+  (match (map-get? issued-credentials { credential-id: credential-id })
+    credential (and 
+      (get validated credential)
+      (< stacks-block-height (get expires-at credential))
+    )
+    false
+  )
+)
+
+(define-read-only (get-marketplace-fee)
+  (var-get marketplace-fee-percentage)
+)
+
+
+
 
