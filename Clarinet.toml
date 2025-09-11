@@ -9,6 +9,14 @@ requirements = []
 path = 'contracts/Decentralized-Identity-Management.clar'
 clarity_version = 3
 epoch = 3.1
+[contracts.IdentityPrivacyScore]
+path = 'contracts/IdentityPrivacyScore.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.IdentityVerificationNetwork]
+path = 'contracts/IdentityVerificationNetwork.clar'
+clarity_version = 3
+epoch = 3.1
 [repl.analysis]
 passes = ['check_checker']
 
