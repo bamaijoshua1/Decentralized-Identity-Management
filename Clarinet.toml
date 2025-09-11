@@ -1,0 +1,27 @@
+[project]
+name = 'Decentralized-Identity-Management'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.Decentralized-Identity-Management]
+path = 'contracts/Decentralized-Identity-Management.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.IdentityPrivacyScore]
+path = 'contracts/IdentityPrivacyScore.clar'
+clarity_version = 3
+epoch = 3.1
+[contracts.IdentityVerificationNetwork]
+path = 'contracts/IdentityVerificationNetwork.clar'
+clarity_version = 3
+epoch = 3.1
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
